@@ -1,258 +1,430 @@
-import logging
-import os
-import threading
-import time
-from datetime import timedelta
 from typing import Any
+from typing import Callable
 from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Union
 
+import numpy as np
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from diffusers import HunyuanVideoTransformer3DModel
+from diffusers import HunyuanVideoPipeline
+from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import DEFAULT_PROMPT_TEMPLATE
+from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import HunyuanVideoPipelineOutput
+from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import MultiPipelineCallbacks
+from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import PipelineCallback
+from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import retrieve_timesteps
 from PIL import Image
-from torchao.quantization import float8_weight_only
-from torchao.quantization import quantize_
-from transformers import LlamaModel
-
-from . import TaskType
-from .offload import Offload
-from .offload import OffloadConfig
-from .pipelines import SkyreelsVideoPipeline
-
-logger = logging.getLogger("SkyreelsVideoInfer")
-logger.setLevel(logging.DEBUG)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter(
-    f"%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d - %(funcName)s] - %(message)s"
-)
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
 
 
-class SkyReelsVideoSingleGpuInfer:
-    def _load_model(
+def resizecrop(image, th, tw):
+    w, h = image.size
+    if h / w > th / tw:
+        new_w = int(w)
+        new_h = int(new_w * th / tw)
+    else:
+        new_h = int(h)
+        new_w = int(new_h * tw / th)
+    left = (w - new_w) / 2
+    top = (h - new_h) / 2
+    right = (w + new_w) / 2
+    bottom = (h + new_h) / 2
+    image = image.crop((left, top, right, bottom))
+    return image
+
+
+def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
+    """
+    Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
+    Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
+    """
+    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
+    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
+    # rescale the results from guidance (fixes overexposure)
+    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
+    # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
+    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
+    return noise_cfg
+
+
+class SkyreelsVideoPipeline(HunyuanVideoPipeline):
+    """
+    support i2v and t2v
+    support true_cfg
+    """
+
+    @property
+    def guidance_rescale(self):
+        return self._guidance_rescale
+
+    @property
+    def clip_skip(self):
+        return self._clip_skip
+
+    @property
+    def do_classifier_free_guidance(self):
+        # return self._guidance_scale > 1 and self.transformer.config.time_cond_proj_dim is None
+        return self._guidance_scale > 1
+
+    def encode_prompt(
         self,
-        model_id: str,
-        base_model_id: str = "hunyuanvideo-community/HunyuanVideo",
-        quant_model: bool = True,
-        gpu_device: str = "cuda:0",
-    ) -> SkyreelsVideoPipeline:
-        logger.info(f"load model model_id:{model_id} quan_model:{quant_model} gpu_device:{gpu_device}")
-        text_encoder = LlamaModel.from_pretrained(
-            base_model_id,
-            subfolder="text_encoder",
-            torch_dtype=torch.bfloat16,
-        ).to("cpu")
-        transformer = HunyuanVideoTransformer3DModel.from_pretrained(
-            model_id,
-            # subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-            device="cpu",
-        ).to("cpu")
-        if quant_model:
-            quantize_(text_encoder, float8_weight_only(), device=gpu_device)
-            text_encoder.to("cpu")
-            torch.cuda.empty_cache()
-            quantize_(transformer, float8_weight_only(), device=gpu_device)
-            transformer.to("cpu")
-            torch.cuda.empty_cache()
-        pipe = SkyreelsVideoPipeline.from_pretrained(
-            base_model_id,
-            transformer=transformer,
-            text_encoder=text_encoder,
-            torch_dtype=torch.bfloat16,
-        ).to("cpu")
-        pipe.vae.enable_tiling()
-        torch.cuda.empty_cache()
-        return pipe
-
-    def __init__(
-        self,
-        task_type: TaskType,
-        model_id: str,
-        quant_model: bool = True,
-        local_rank: int = 0,
-        world_size: int = 1,
-        is_offload: bool = True,
-        offload_config: OffloadConfig = OffloadConfig(),
-        enable_cfg_parallel: bool = True,
+        prompt: Union[str, List[str]],
+        do_classifier_free_guidance: bool,
+        negative_prompt: str = "",
+        prompt_template: Dict[str, Any] = DEFAULT_PROMPT_TEMPLATE,
+        num_videos_per_prompt: int = 1,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_attention_mask: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_attention_mask: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+        max_sequence_length: int = 256,
     ):
-        self.task_type = task_type
-        self.gpu_rank = local_rank
-        dist.init_process_group(
-            backend="nccl",
-            init_method="tcp://127.0.0.1:23456",
-            timeout=timedelta(seconds=600),
-            world_size=world_size,
-            rank=local_rank,
+        num_hidden_layers_to_skip = self.clip_skip if self.clip_skip is not None else 0
+        print(f"num_hidden_layers_to_skip: {num_hidden_layers_to_skip}")
+        if prompt_embeds is None:
+            prompt_embeds, prompt_attention_mask = self._get_llama_prompt_embeds(
+                prompt,
+                prompt_template,
+                num_videos_per_prompt,
+                device=device,
+                dtype=dtype,
+                num_hidden_layers_to_skip=num_hidden_layers_to_skip,
+                max_sequence_length=max_sequence_length,
+            )
+        if negative_prompt_embeds is None and do_classifier_free_guidance:
+            negative_prompt_embeds, negative_attention_mask = self._get_llama_prompt_embeds(
+                negative_prompt,
+                prompt_template,
+                num_videos_per_prompt,
+                device=device,
+                dtype=dtype,
+                num_hidden_layers_to_skip=num_hidden_layers_to_skip,
+                max_sequence_length=max_sequence_length,
+            )
+        if self.text_encoder_2 is not None and pooled_prompt_embeds is None:
+            pooled_prompt_embeds = self._get_clip_prompt_embeds(
+                prompt,
+                num_videos_per_prompt,
+                device=device,
+                dtype=dtype,
+                max_sequence_length=77,
+            )
+            if negative_pooled_prompt_embeds is None and do_classifier_free_guidance:
+                negative_pooled_prompt_embeds = self._get_clip_prompt_embeds(
+                    negative_prompt,
+                    num_videos_per_prompt,
+                    device=device,
+                    dtype=dtype,
+                    max_sequence_length=77,
+                )
+        return (
+            prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_embeds,
+            negative_attention_mask,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
         )
-        os.environ["LOCAL_RANK"] = str(local_rank)
-        logger.info(f"rank:{local_rank} Distributed backend: {dist.get_backend()}")
-        torch.cuda.set_device(dist.get_rank())
-        torch.backends.cuda.enable_cudnn_sdp(False)
-        gpu_device = f"cuda:{dist.get_rank()}"
 
-        self.pipe: SkyreelsVideoPipeline = self._load_model(
-            model_id=model_id, quant_model=quant_model, gpu_device=gpu_device
+    def image_latents(
+        self,
+        initial_image,
+        batch_size,
+        height,
+        width,
+        device,
+        dtype,
+        num_channels_latents,
+        video_length,
+    ):
+        initial_image = initial_image.unsqueeze(2)
+        image_latents = self.vae.encode(initial_image).latent_dist.sample()
+        if hasattr(self.vae.config, "shift_factor") and self.vae.config.shift_factor:
+            image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+        else:
+            image_latents = image_latents * self.vae.config.scaling_factor
+        padding_shape = (
+            batch_size,
+            num_channels_latents,
+            video_length - 1,
+            int(height) // self.vae_scale_factor_spatial,
+            int(width) // self.vae_scale_factor_spatial,
+        )
+        latent_padding = torch.zeros(padding_shape, device=device, dtype=dtype)
+        image_latents = torch.cat([image_latents, latent_padding], dim=2)
+        return image_latents
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt: str,
+        negative_prompt: str = "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion",
+        height: int = 720,
+        width: int = 1280,
+        num_frames: int = 129,
+        num_inference_steps: int = 50,
+        sigmas: List[float] = None,
+        guidance_scale: float = 1.0,
+        num_videos_per_prompt: Optional[int] = 1,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        pooled_prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_attention_mask: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_attention_mask: Optional[torch.Tensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        attention_kwargs: Optional[Dict[str, Any]] = None,
+        guidance_rescale: float = 0.0,
+        clip_skip: Optional[int] = 2,
+        callback_on_step_end: Optional[
+            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
+        ] = None,
+        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        prompt_template: Dict[str, Any] = DEFAULT_PROMPT_TEMPLATE,
+        max_sequence_length: int = 256,
+        embedded_guidance_scale: Optional[float] = 6.0,
+        image: Optional[Union[torch.Tensor, Image.Image]] = None,
+        cfg_for: bool = False,
+    ):
+        if hasattr(self, "text_encoder_to_gpu"):
+            self.text_encoder_to_gpu()
+
+        if image is not None and isinstance(image, Image.Image):
+            image = resizecrop(image, height, width)
+
+        if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
+            callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
+
+        # 1. Check inputs. Raise error if not correct
+        self.check_inputs(
+            prompt,
+            None,
+            height,
+            width,
+            prompt_embeds,
+            callback_on_step_end_tensor_inputs,
+            prompt_template,
+        )
+        #  add negative prompt check
+        if negative_prompt is not None and negative_prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
+                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
+            )
+
+        if prompt_embeds is not None and negative_prompt_embeds is not None:
+            if prompt_embeds.shape != negative_prompt_embeds.shape:
+                raise ValueError(
+                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
+                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
+                    f" {negative_prompt_embeds.shape}."
+                )
+
+        self._guidance_scale = guidance_scale
+        self._guidance_rescale = guidance_rescale
+        self._clip_skip = clip_skip
+        self._attention_kwargs = attention_kwargs
+        self._interrupt = False
+
+        device = self._execution_device
+
+        # 2. Define call parameters
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        # 3. Encode input prompt
+        (
+            prompt_embeds,
+            prompt_attention_mask,
+            negative_prompt_embeds,
+            negative_attention_mask,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        ) = self.encode_prompt(
+            prompt=prompt,
+            do_classifier_free_guidance=self.do_classifier_free_guidance,
+            negative_prompt=negative_prompt,
+            prompt_template=prompt_template,
+            num_videos_per_prompt=num_videos_per_prompt,
+            prompt_embeds=prompt_embeds,
+            prompt_attention_mask=prompt_attention_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_attention_mask=negative_attention_mask,
+            device=device,
+            max_sequence_length=max_sequence_length,
         )
 
-        from para_attn.context_parallel import init_context_parallel_mesh
-        from para_attn.context_parallel.diffusers_adapters import parallelize_pipe
-        from para_attn.parallel_vae.diffusers_adapters import parallelize_vae
+        transformer_dtype = self.transformer.dtype
+        prompt_embeds = prompt_embeds.to(transformer_dtype)
+        prompt_attention_mask = prompt_attention_mask.to(transformer_dtype)
+        if pooled_prompt_embeds is not None:
+            pooled_prompt_embeds = pooled_prompt_embeds.to(transformer_dtype)
 
-        max_batch_dim_size = 2 if enable_cfg_parallel and world_size > 1 else 1
-        max_ulysses_dim_size = int(world_size / max_batch_dim_size)
-        logger.info(f"max_batch_dim_size: {max_batch_dim_size}, max_ulysses_dim_size:{max_ulysses_dim_size}")
+        ## Embeddings are concatenated to form a batch.
+        if self.do_classifier_free_guidance:
+            negative_prompt_embeds = negative_prompt_embeds.to(transformer_dtype)
+            negative_attention_mask = negative_attention_mask.to(transformer_dtype)
+            if negative_pooled_prompt_embeds is not None:
+                negative_pooled_prompt_embeds = negative_pooled_prompt_embeds.to(transformer_dtype)
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            if prompt_attention_mask is not None:
+                prompt_attention_mask = torch.cat([negative_attention_mask, prompt_attention_mask])
+            if pooled_prompt_embeds is not None:
+                pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
 
-        mesh = init_context_parallel_mesh(
-            self.pipe.device.type,
-            max_ring_dim_size=1,
-            max_batch_dim_size=max_batch_dim_size,
+        # 4. Prepare timesteps
+        sigmas = np.linspace(1.0, 0.0, num_inference_steps + 1)[:-1] if sigmas is None else sigmas
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            device,
+            sigmas=sigmas,
         )
-        parallelize_pipe(self.pipe, mesh=mesh)
-        parallelize_vae(self.pipe.vae, mesh=mesh._flatten())
 
-        if is_offload:
-            Offload.offload(
-                pipeline=self.pipe,
-                config=offload_config,
+        # 5. Prepare latent variables
+        num_channels_latents = self.transformer.config.in_channels
+        if image is not None:
+            num_channels_latents = int(num_channels_latents / 2)
+            image = self.video_processor.preprocess(image, height=height, width=width).to(
+                device, dtype=prompt_embeds.dtype
+            )
+        num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
+        latents = self.prepare_latents(
+            batch_size * num_videos_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            num_latent_frames,
+            torch.float32,
+            device,
+            generator,
+            latents,
+        )
+        # add image latents
+        if image is not None:
+            image_latents = self.image_latents(
+                image, batch_size, height, width, device, torch.float32, num_channels_latents, num_latent_frames
+            )
+
+            image_latents = image_latents.to(transformer_dtype)
+        else:
+            image_latents = None
+
+        # 6. Prepare guidance condition
+        if self.do_classifier_free_guidance:
+            guidance = (
+                torch.tensor([embedded_guidance_scale] * latents.shape[0] * 2, dtype=transformer_dtype, device=device)
+                * 1000.0
             )
         else:
-            self.pipe.to(gpu_device)
-
-        if offload_config.compiler_transformer:
-            torch._dynamo.config.suppress_errors = True
-            os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
-            os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"{offload_config.compiler_cache}_{world_size}"
-            self.pipe.transformer = torch.compile(
-                self.pipe.transformer,
-                mode="max-autotune-no-cudagraphs",
-                dynamic=True,
+            guidance = (
+                torch.tensor([embedded_guidance_scale] * latents.shape[0], dtype=transformer_dtype, device=device)
+                * 1000.0
             )
-            self.warm_up()
 
-    def warm_up(self):
-        init_kwargs = {
-            "prompt": "A woman is dancing in a room",
-            "height": 544,
-            "width": 960,
-            "guidance_scale": 6,
-            "num_inference_steps": 1,
-            "negative_prompt": "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion",
-            "num_frames": 97,
-            "generator": torch.Generator("cuda").manual_seed(42),
-            "embedded_guidance_scale": 1.0,
-        }
-        if self.task_type == TaskType.I2V:
-            init_kwargs["image"] = Image.new("RGB", (544, 960), color="black")
-        self.pipe(**init_kwargs)
+        # 7. Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        self._num_timesteps = len(timesteps)
 
-    def damon_inference(self, request_queue: mp.Queue, response_queue: mp.Queue):
-        response_queue.put(f"rank:{self.gpu_rank} ready")
-        logger.info(f"rank:{self.gpu_rank} finish init pipe")
-        while True:
-            logger.info(f"rank:{self.gpu_rank} waiting for request")
-            kwargs = request_queue.get()
-            logger.info(f"rank:{self.gpu_rank} kwargs: {kwargs}")
-            if "seed" in kwargs:
-                kwargs["generator"] = torch.Generator("cuda").manual_seed(kwargs["seed"])
-                del kwargs["seed"]
-            start_time = time.time()
-            assert (self.task_type == TaskType.I2V and "image" in kwargs) or self.task_type == TaskType.T2V
-            out = self.pipe(**kwargs).frames[0]
-            logger.info(f"rank:{dist.get_rank()} inference time: {time.time() - start_time}")
-            if dist.get_rank() == 0:
-                response_queue.put(out)
+        if hasattr(self, "text_encoder_to_cpu"):
+            self.text_encoder_to_cpu()
 
+        # 20240222 pftq: Import torch.distributed to get world_size for multi-GPU padding
+        import torch.distributed as dist
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-def single_gpu_run(
-    rank,
-    task_type: TaskType,
-    model_id: str,
-    request_queue: mp.Queue,
-    response_queue: mp.Queue,
-    quant_model: bool = True,
-    world_size: int = 1,
-    is_offload: bool = True,
-    offload_config: OffloadConfig = OffloadConfig(),
-    enable_cfg_parallel: bool = True,
-):
-    pipe = SkyReelsVideoSingleGpuInfer(
-        task_type=task_type,
-        model_id=model_id,
-        quant_model=quant_model,
-        local_rank=rank,
-        world_size=world_size,
-        is_offload=is_offload,
-        offload_config=offload_config,
-        enable_cfg_parallel=enable_cfg_parallel,
-    )
-    pipe.damon_inference(request_queue, response_queue)
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                if self.interrupt:
+                    continue
 
+                latents = latents.to(transformer_dtype)
+                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                if image_latents is not None:
+                    latent_image_input = (
+                        torch.cat([image_latents] * 2) if self.do_classifier_free_guidance else image_latents
+                    )
+                    latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
+                timestep = t.repeat(latent_model_input.shape[0]).to(torch.float32)
 
-class SkyReelsVideoInfer:
-    def __init__(
-        self,
-        task_type: TaskType,
-        model_id: str,
-        quant_model: bool = True,
-        world_size: int = 1,
-        is_offload: bool = True,
-        offload_config: OffloadConfig = OffloadConfig(),
-        enable_cfg_parallel: bool = True,
-    ):
-        self.world_size = world_size
-        smp = mp.get_context("spawn")
-        self.REQ_QUEUES: mp.Queue = smp.Queue()
-        self.RESP_QUEUE: mp.Queue = smp.Queue()
-        assert self.world_size > 0, "gpu_num must be greater than 0"
-        spawn_thread = threading.Thread(
-            target=self.lauch_single_gpu_infer,
-            args=(task_type, model_id, quant_model, world_size, is_offload, offload_config, enable_cfg_parallel),
-            daemon=True,
-        )
-        spawn_thread.start()
-        logger.info(f"Started multi-GPU thread with GPU_NUM: {world_size}")
-        print(f"Started multi-GPU thread with GPU_NUM: {world_size}")
-        # Block and wait for the prediction process to start
-        for _ in range(world_size):
-            msg = self.RESP_QUEUE.get()
-            logger.info(f"launch_multi_gpu get init msg: {msg}")
-            print(f"launch_multi_gpu get init msg: {msg}")
+                # 20240222 pftq: Pad inputs to ensure batch size is divisible by world_size for multi-GPU compatibility
+                if world_size > 1:
+                    target_size = ((latent_model_input.shape[0] + world_size - 1) // world_size) * world_size
+                    if latent_model_input.shape[0] < target_size:
+                        padding = target_size - latent_model_input.shape[0]
+                        latent_model_input = torch.cat([latent_model_input, torch.zeros_like(latent_model_input[:padding])], dim=0)
+                        timestep = torch.cat([timestep, timestep[-1].repeat(padding)], dim=0)
+                        prompt_embeds = torch.cat([prompt_embeds, prompt_embeds[-padding:]], dim=0)
+                        encoder_attention_mask = torch.cat([encoder_attention_mask, encoder_attention_mask[-padding:]], dim=0)
+                        pooled_prompt_embeds = torch.cat([pooled_prompt_embeds, pooled_prompt_embeds[-padding:]], dim=0)
+                        guidance = torch.cat([guidance, guidance[-padding:]], dim=0)
 
-    def lauch_single_gpu_infer(
-        self,
-        task_type: TaskType,
-        model_id: str,
-        quant_model: bool = True,
-        world_size: int = 1,
-        is_offload: bool = True,
-        offload_config: OffloadConfig = OffloadConfig(),
-        enable_cfg_parallel: bool = True,
-    ):
-        mp.spawn(
-            single_gpu_run,
-            nprocs=world_size,
-            join=True,
-            daemon=True,
-            args=(
-                task_type,
-                model_id,
-                self.REQ_QUEUES,
-                self.RESP_QUEUE,
-                quant_model,
-                world_size,
-                is_offload,
-                offload_config,
-                enable_cfg_parallel,
-            ),
-        )
-        logger.info(f"finish lanch multi gpu infer, world_size:{world_size}")
+                # 20240222 pftq: Replace for loop with single batched transformer call for all GPU counts
+                noise_pred = self.transformer(
+                    hidden_states=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    encoder_attention_mask=prompt_attention_mask,
+                    pooled_projections=pooled_prompt_embeds,
+                    guidance=guidance,
+                    attention_kwargs=attention_kwargs,
+                    return_dict=False,
+                )[0]
 
-    def inference(self, kwargs: Dict[str, Any]):
-        # put request to singlegpuinfer
-        for _ in range(self.world_size):
-            self.REQ_QUEUES.put(kwargs)
-        return self.RESP_QUEUE.get()
+                # 20240222 pftq: Trim padding from noise_pred to match original batch size
+                if world_size > 1 and latent_model_input.shape[0] > latents.shape[0] * (2 if self.do_classifier_free_guidance else 1):
+                    orig_batch_size = latents.shape[0] * (2 if self.do_classifier_free_guidance else 1)
+                    noise_pred = noise_pred[:orig_batch_size]
+
+                # perform guidance
+                if self.do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                    noise_pred = rescale_noise_cfg(
+                        noise_pred,
+                        noise_pred_text,
+                        guidance_rescale=self.guidance_rescale,
+                    )
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+
+                if callback_on_step_end is not None:
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
+                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                    latents = callback_outputs.pop("latents", latents)
+                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+
+        if not output_type == "latent":
+            latents = latents.to(self.vae.dtype) / self.vae.config.scaling_factor
+            video = self.vae.decode(latents, return_dict=False)[0]
+            video = self.video_processor.postprocess_video(video, output_type=output_type)
+        else:
+            video = latents
+
+        # Offload all models
+        self.maybe_free_model_hooks()
+
+        if not return_dict:
+            return (video,)
+
+        return HunyuanVideoPipelineOutput(frames=video)
