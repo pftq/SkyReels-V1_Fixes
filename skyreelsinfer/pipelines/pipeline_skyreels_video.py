@@ -338,6 +338,10 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
         if hasattr(self, "text_encoder_to_cpu"):
             self.text_encoder_to_cpu()
 
+        # 20240222 pftq: Import torch.distributed to get world_size for multi-GPU padding
+        import torch.distributed as dist
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -345,40 +349,41 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
 
                 latents = latents.to(transformer_dtype)
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                # timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 if image_latents is not None:
                     latent_image_input = (
                         torch.cat([image_latents] * 2) if self.do_classifier_free_guidance else image_latents
                     )
                     latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
                 timestep = t.repeat(latent_model_input.shape[0]).to(torch.float32)
-                if cfg_for and self.do_classifier_free_guidance:
-                    noise_pred_list = []
-                    for idx in range(latent_model_input.shape[0]):
-                        noise_pred_uncond = self.transformer(
-                            hidden_states=latent_model_input[idx].unsqueeze(0),
-                            timestep=timestep[idx].unsqueeze(0),
-                            encoder_hidden_states=prompt_embeds[idx].unsqueeze(0),
-                            encoder_attention_mask=prompt_attention_mask[idx].unsqueeze(0),
-                            pooled_projections=pooled_prompt_embeds[idx].unsqueeze(0),
-                            guidance=guidance[idx].unsqueeze(0),
-                            attention_kwargs=attention_kwargs,
-                            return_dict=False,
-                        )[0]
-                        noise_pred_list.append(noise_pred_uncond)
-                    noise_pred = torch.cat(noise_pred_list, dim=0)
-                else:
-                    noise_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep,
-                        encoder_hidden_states=prompt_embeds,
-                        encoder_attention_mask=prompt_attention_mask,
-                        pooled_projections=pooled_prompt_embeds,
-                        guidance=guidance,
-                        attention_kwargs=attention_kwargs,
-                        return_dict=False,
-                    )[0]
+
+                # 20240222 pftq: Pad inputs to ensure batch size is divisible by world_size for multi-GPU compatibility
+                if world_size > 1:
+                    target_size = ((latent_model_input.shape[0] + world_size - 1) // world_size) * world_size
+                    if latent_model_input.shape[0] < target_size:
+                        padding = target_size - latent_model_input.shape[0]
+                        latent_model_input = torch.cat([latent_model_input, torch.zeros_like(latent_model_input[:padding])], dim=0)
+                        timestep = torch.cat([timestep, timestep[-1].repeat(padding)], dim=0)
+                        prompt_embeds = torch.cat([prompt_embeds, prompt_embeds[-padding:]], dim=0)
+                        encoder_attention_mask = torch.cat([encoder_attention_mask, encoder_attention_mask[-padding:]], dim=0)
+                        pooled_prompt_embeds = torch.cat([pooled_prompt_embeds, pooled_prompt_embeds[-padding:]], dim=0)
+                        guidance = torch.cat([guidance, guidance[-padding:]], dim=0)
+
+                # 20240222 pftq: Replace for loop with single batched transformer call for all GPU counts
+                noise_pred = self.transformer(
+                    hidden_states=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    encoder_attention_mask=prompt_attention_mask,
+                    pooled_projections=pooled_prompt_embeds,
+                    guidance=guidance,
+                    attention_kwargs=attention_kwargs,
+                    return_dict=False,
+                )[0]
+
+                # 20240222 pftq: Trim padding from noise_pred to match original batch size
+                if world_size > 1 and latent_model_input.shape[0] > latents.shape[0] * (2 if self.do_classifier_free_guidance else 1):
+                    orig_batch_size = latents.shape[0] * (2 if self.do_classifier_free_guidance else 1)
+                    noise_pred = noise_pred[:orig_batch_size]
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
