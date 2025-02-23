@@ -338,7 +338,7 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
         if hasattr(self, "text_encoder_to_cpu"):
             self.text_encoder_to_cpu()
 
-        # 20240222 pftq: Import torch.distributed to get world_size for multi-GPU padding
+        # 20250222 pftq: Import torch.distributed to get world_size for multi-GPU padding
         import torch.distributed as dist
         world_size = dist.get_world_size() if dist.is_initialized() else 1
 
@@ -356,19 +356,38 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
                     latent_model_input = torch.cat([latent_model_input, latent_image_input], dim=1)
                 timestep = t.repeat(latent_model_input.shape[0]).to(torch.float32)
 
-                # 20240222 pftq: Pad inputs to ensure batch size is divisible by world_size for multi-GPU compatibility
+                # 20250222 pftq: Pad inputs to match latent_model_input.shape[0] for multi-GPU compatibility
                 if world_size > 1:
-                    target_size = ((latent_model_input.shape[0] + world_size - 1) // world_size) * world_size
-                    if latent_model_input.shape[0] < target_size:
-                        padding = target_size - latent_model_input.shape[0]
-                        latent_model_input = torch.cat([latent_model_input, torch.zeros_like(latent_model_input[:padding])], dim=0)
+                    target_batch_size = latent_model_input.shape[0]  # 20250222 pftq: Match post-CFG size (4 initially)
+
+                    
+                    # 20250222 pftq: Pad all tensors to match latent_model_input.shape[0]
+                    if timestep.shape[0] < target_batch_size:
+                        padding = target_batch_size - timestep.shape[0]
                         timestep = torch.cat([timestep, timestep[-1].repeat(padding)], dim=0)
+                    if prompt_embeds.shape[0] < target_batch_size:
+                        padding = target_batch_size - prompt_embeds.shape[0]
                         prompt_embeds = torch.cat([prompt_embeds, prompt_embeds[-padding:]], dim=0)
-                        encoder_attention_mask = torch.cat([encoder_attention_mask, encoder_attention_mask[-padding:]], dim=0)
+                    if prompt_attention_mask is not None and prompt_attention_mask.shape[0] < target_batch_size:
+                        padding = target_batch_size - prompt_attention_mask.shape[0]
+                        prompt_attention_mask = torch.cat([prompt_attention_mask, prompt_attention_mask[-padding:]], dim=0)
+                    if pooled_prompt_embeds is not None and pooled_prompt_embeds.shape[0] < target_batch_size:
+                        padding = target_batch_size - pooled_prompt_embeds.shape[0]
                         pooled_prompt_embeds = torch.cat([pooled_prompt_embeds, pooled_prompt_embeds[-padding:]], dim=0)
+                    if guidance.shape[0] < target_batch_size:
+                        padding = target_batch_size - guidance.shape[0]
                         guidance = torch.cat([guidance, guidance[-padding:]], dim=0)
 
-                # 20240222 pftq: Replace for loop with single batched transformer call for all GPU counts
+                    # 20250222 pftq: Pad spatial/temporal dimension
+                    orig_size_dim_minus_2 = latent_model_input.shape[-2]
+                    target_size_dim_minus_2 = ((orig_size_dim_minus_2 + world_size - 1) // world_size) * world_size
+                    if orig_size_dim_minus_2 < target_size_dim_minus_2:
+                        padding_size = target_size_dim_minus_2 - orig_size_dim_minus_2
+                        padding_shape = list(latent_model_input.shape)
+                        padding_shape[-2] = padding_size
+                        latent_model_input = torch.cat([latent_model_input, torch.zeros(padding_shape, device=device, dtype=transformer_dtype)], dim=-2)
+
+                    
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep,
@@ -379,13 +398,13 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
                     attention_kwargs=attention_kwargs,
                     return_dict=False,
                 )[0]
-
-                # 20240222 pftq: Trim padding from noise_pred to match original batch size
+                
                 if world_size > 1 and latent_model_input.shape[0] > latents.shape[0] * (2 if self.do_classifier_free_guidance else 1):
                     orig_batch_size = latents.shape[0] * (2 if self.do_classifier_free_guidance else 1)
                     noise_pred = noise_pred[:orig_batch_size]
-
-                # perform guidance
+                if world_size > 1 and latent_model_input.shape[-2] > orig_size_dim_minus_2:
+                    noise_pred = noise_pred[..., :orig_size_dim_minus_2, :]
+                
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
