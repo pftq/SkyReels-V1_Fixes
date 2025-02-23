@@ -92,6 +92,7 @@ if __name__ == "__main__":
         writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         writer.set(cv2.CAP_PROP_BITRATE, bitrate)
         for frame in frames:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             writer.write(frame)
         writer.release()
     
@@ -107,3 +108,5 @@ if __name__ == "__main__":
         video_out_file = formatted_time+f"_cfg-{args.guidance_scale}_steps-{args.num_inference_steps}_{args.prompt[:20].replace('/','')}_{idx}.mp4"
         bitrate_bps = int(args.mbps * 1000)
         save_video_with_quality(output, f"{out_dir}/{video_out_file}", args.fps, bitrate_bps)
+
+
