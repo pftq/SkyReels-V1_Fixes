@@ -38,6 +38,7 @@ if __name__ == "__main__":
     parser.add_argument("--parameters_level", action="store_true")
     parser.add_argument("--compiler_transformer", action="store_true")
     parser.add_argument("--sequence_batch", action="store_true")
+    parser.add_argument("--mbps", type=float, default=7)
 
     args = parser.parse_args()
 
@@ -79,7 +80,30 @@ if __name__ == "__main__":
     }
     if args.task_type == "i2v":
         kwargs["image"] = image
+
+
+    #20250223 pftq: customizable bitrate
+    def save_video_with_quality(frames, output_path, fps, bitrate):
+        import cv2
+        import numpy as np
+        frames = [np.array(frame) for frame in frames]
+        height, width, _ = frames[0].shape
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        writer.set(cv2.CAP_PROP_BITRATE, bitrate)
+        for frame in frames:
+            writer.write(frame)
+        writer.release()
+    
     for idx in range(args.video_num):
         output = predictor.inference(kwargs)
-        video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{idx}.mp4"
-        export_to_video(output, f"{out_dir}/{video_out_file}", fps=args.fps)
+        #video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{idx}.mp4"
+        #export_to_video(output, f"{out_dir}/{video_out_file}", fps=args.fps)
+
+        #20250223 pftq: More useful filename and higher customizable bitrate
+        from datetime import datetime
+        now = datetime.now()
+        formatted_time = now.strftime('%Y-%m-%d_%H-%M-%S')
+        video_out_file = formatted_time+f"_cfg-{args.guidance_scale}_steps-{args.num_inference_steps}_{args.prompt[:20].replace('/','')}_{idx}.mp4"
+        bitrate_bps = int(args.mbps * 1000)
+        save_video_with_quality(output, f"{out_dir}/{video_out_file}", args.fps, bitrate_bps)
