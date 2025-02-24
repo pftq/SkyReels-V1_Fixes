@@ -48,10 +48,6 @@ if __name__ == "__main__":
     if args.task_type == "i2v":
         image = load_image(args.image)
     
-    if args.seed == -1:
-        random.seed(time.time())
-        args.seed = int(random.randrange(4294967294))
-
     predictor = SkyReelsVideoInfer(
         task_type=TaskType.I2V if args.task_type == "i2v" else TaskType.T2V,
         model_id=args.model_id,
@@ -66,95 +62,104 @@ if __name__ == "__main__":
         enable_cfg_parallel=args.guidance_scale > 1.0 and not args.sequence_batch,
     )
     print("finish pipeline init")
-    kwargs = {
-        "prompt": args.prompt,
-        "height": args.height,
-        "width": args.width,
-        "num_frames": args.num_frames,
-        "num_inference_steps": args.num_inference_steps,
-        "seed": args.seed,
-        "guidance_scale": args.guidance_scale,
-        "embedded_guidance_scale": args.embedded_guidance_scale,
-        "negative_prompt": args.negative_prompt,
-        "cfg_for": args.sequence_batch,
-    }
-    if args.task_type == "i2v":
-        kwargs["image"] = image
 
-
-    #20250223 pftq: customizable bitrate
-    # Function to check if FFmpeg is installed
-    import subprocess  # For FFmpeg functionality
-    import numpy as np  # For frame conversion
-    import cv2  # For OpenCV fallback
-    def is_ffmpeg_installed():
-        try:
-            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return False
+    for idx in range(args.video_num): # 20250224 pftq: for loop needs to start earlier before seed is set
+        
+        if args.seed == -1 or idx > 0: # 20250224 pftq: seed argument ignored if asking for more than one video
+            random.seed(time.time())
+            args.seed = int(random.randrange(4294967294))
+        
+        kwargs = {
+            "prompt": args.prompt,
+            "height": args.height,
+            "width": args.width,
+            "num_frames": args.num_frames,
+            "num_inference_steps": args.num_inference_steps,
+            "seed": args.seed,
+            "guidance_scale": args.guidance_scale,
+            "embedded_guidance_scale": args.embedded_guidance_scale,
+            "negative_prompt": args.negative_prompt,
+            "cfg_for": args.sequence_batch,
+        }
+        if args.task_type == "i2v":
+            kwargs["image"] = image
     
-    # FFmpeg-based video saving with bitrate control
-    def save_video_with_ffmpeg(frames, output_path, fps, bitrate_mbps):
-        frames = [np.array(frame) for frame in frames]
-        height, width, _ = frames[0].shape
-        bitrate = f"{bitrate_mbps}M"
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f", "rawvideo",
-            "-vcodec", "rawvideo",
-            "-s", f"{width}x{height}",
-            "-pix_fmt", "rgb24",
-            "-r", str(fps),
-            "-i", "-",
-            "-c:v", "libx264",
-            "-b:v", bitrate,
-            "-pix_fmt", "yuv420p",
-            "-preset", "medium",
-            output_path
-        ]
-        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        for frame in frames:
-            process.stdin.write(frame.tobytes())
-        process.stdin.close()
-        process.wait()
-        stderr_output = process.stderr.read().decode()
-        if process.returncode != 0:
-            print(f"FFmpeg error: {stderr_output}")
-        else:
-            print(f"Video saved to {output_path} with FFmpeg")
     
-    # Fallback OpenCV-based video saving
-    def save_video_with_opencv(frames, output_path, fps, bitrate_mbps):
-        frames = [np.array(frame) for frame in frames]
-        height, width, _ = frames[0].shape
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        # Note: cv2.CAP_PROP_BITRATE is not supported, so bitrate_mbps is ignored
-        for frame in frames:
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # Convert RGB to BGR for OpenCV
-            writer.write(frame)
-        writer.release()
-        print(f"Video saved to {output_path} with OpenCV (bitrate control unavailable)")
+        #20250223 pftq: customizable bitrate
+        # Function to check if FFmpeg is installed
+        import subprocess  # For FFmpeg functionality
+        import numpy as np  # For frame conversion
+        import cv2  # For OpenCV fallback
+        def is_ffmpeg_installed():
+            try:
+                subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                return True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                return False
+        
+        # FFmpeg-based video saving with bitrate control
+        def save_video_with_ffmpeg(frames, output_path, fps, bitrate_mbps):
+            frames = [np.array(frame) for frame in frames]
+            height, width, _ = frames[0].shape
+            bitrate = f"{bitrate_mbps}M"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f", "rawvideo",
+                "-vcodec", "rawvideo",
+                "-s", f"{width}x{height}",
+                "-pix_fmt", "rgb24",
+                "-r", str(fps),
+                "-i", "-",
+                "-c:v", "libx264",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p",
+                "-preset", "medium",
+                output_path
+            ]
+            process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            for frame in frames:
+                process.stdin.write(frame.tobytes())
+            process.stdin.close()
+            process.wait()
+            stderr_output = process.stderr.read().decode()
+            if process.returncode != 0:
+                print(f"FFmpeg error: {stderr_output}")
+            else:
+                print(f"Video saved to {output_path} with FFmpeg")
+        
+        # Fallback OpenCV-based video saving
+        def save_video_with_opencv(frames, output_path, fps, bitrate_mbps):
+            frames = [np.array(frame) for frame in frames]
+            height, width, _ = frames[0].shape
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            # Note: cv2.CAP_PROP_BITRATE is not supported, so bitrate_mbps is ignored
+            for frame in frames:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # Convert RGB to BGR for OpenCV
+                writer.write(frame)
+            writer.release()
+            print(f"Video saved to {output_path} with OpenCV (bitrate control unavailable)")
+        
+        # Wrapper to choose between FFmpeg and OpenCV
+        def save_video_with_quality(frames, output_path, fps, bitrate_mbps):
+            if is_ffmpeg_installed():
+                save_video_with_ffmpeg(frames, output_path, fps, bitrate_mbps)
+            else:
+                print("FFmpeg not found. Falling back to OpenCV (bitrate not customizable).")
+                save_video_with_opencv(frames, output_path, fps, bitrate_mbps)
     
-    # Wrapper to choose between FFmpeg and OpenCV
-    def save_video_with_quality(frames, output_path, fps, bitrate_mbps):
-        if is_ffmpeg_installed():
-            save_video_with_ffmpeg(frames, output_path, fps, bitrate_mbps)
-        else:
-            print("FFmpeg not found. Falling back to OpenCV (bitrate not customizable).")
-            save_video_with_opencv(frames, output_path, fps, bitrate_mbps)
-
-    
-    for idx in range(args.video_num):
+        
+        
         output = predictor.inference(kwargs)
         #video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{idx}.mp4"
         #export_to_video(output, f"{out_dir}/{video_out_file}", fps=args.fps)
-
+    
         #20250223 pftq: More useful filename and higher customizable bitrate
         from datetime import datetime
         now = datetime.now()
         formatted_time = now.strftime('%Y-%m-%d_%H-%M-%S')
         video_out_file = formatted_time+f"_cfg-{args.guidance_scale}_steps-{args.num_inference_steps}_{args.prompt[:20].replace('/','')}_seed-{args.seed}_{idx}.mp4"
         save_video_with_quality(output, f"{out_dir}/{video_out_file}", args.fps, args.mbps)
+    
+    
