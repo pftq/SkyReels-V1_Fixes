@@ -27,7 +27,7 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=int, default=544)
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--gpu_num", type=int, default=1)
-    parser.add_argument("--video_num", type=int, default=2)
+    parser.add_argument("--video_num", type=int, default=1) # 20250224 pftq: default 1 video instead of 2
     parser.add_argument("--task_type", type=str, default="t2v", choices=["t2v", "i2v"])
     parser.add_argument("--image", type=str, default="")
     parser.add_argument("--embedded_guidance_scale", type=float, default=1.0)
