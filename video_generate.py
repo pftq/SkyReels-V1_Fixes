@@ -17,7 +17,7 @@ if __name__ == "__main__":
     parser.add_argument("--guidance_scale", type=float, default=6.0)
     parser.add_argument("--num_frames", type=int, default=97)
     parser.add_argument("--num_inference_steps", type=int, default=30)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=-1) # 20250224 42 default changed to -1 otherwise negative seed never triggers
     parser.add_argument("--prompt", type=str, default="FPS-24, A 3D model of a 1800s victorian house.")
     parser.add_argument(
         "--negative_prompt",
@@ -161,5 +161,3 @@ if __name__ == "__main__":
         formatted_time = now.strftime('%Y-%m-%d_%H-%M-%S')
         video_out_file = formatted_time+f"_cfg-{args.guidance_scale}_steps-{args.num_inference_steps}_{args.prompt[:20].replace('/','')}_seed-{args.seed}_{idx}.mp4"
         save_video_with_quality(output, f"{out_dir}/{video_out_file}", args.fps, args.mbps)
-    
-    
