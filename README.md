@@ -5,7 +5,7 @@
 # SkyReels V1: Human-Centric Video Foundation Model
 
 <p align="center">
-🤗 <a href="https://huggingface.co/collections/Skywork/skyreels-v1-67b34676ff65b4ec02d16307" target="_blank">Hugging Face</a> · 👋 <a href="https://www.skyreels.ai/" target="_blank">Playground</a>
+🤗 <a href="https://huggingface.co/collections/Skywork/skyreels-v1-67b34676ff65b4ec02d16307" target="_blank">Hugging Face</a> · 👋 <a href="https://www.skyreels.ai/home?utm_campaign=github_V1" target="_blank">Playground</a> · 💬 <a href="https://discord.gg/PwM6NYtccQ" target="_blank">Discord</a>
 </p>
 
 ---
