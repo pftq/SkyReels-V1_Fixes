@@ -159,5 +159,5 @@ if __name__ == "__main__":
         from datetime import datetime
         now = datetime.now()
         formatted_time = now.strftime('%Y-%m-%d_%H-%M-%S')
-        video_out_file = formatted_time+f"_cfg-{args.guidance_scale}_steps-{args.num_inference_steps}_{args.prompt[:20].replace('/','')}_seed-{args.seed}_{idx}.mp4"
+        video_out_file = formatted_time+f"_skyreel_{args.width}-{args.num_frames}f_cfg-{args.guidance_scale}_steps-{args.num_inference_steps}_seed-{args.seed}_{idx}.mp4"
         save_video_with_quality(output, f"{out_dir}/{video_out_file}", args.fps, args.mbps)
