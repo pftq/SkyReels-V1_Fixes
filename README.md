@@ -2,7 +2,7 @@ Original SkyReels repo: https://github.com/SkyworkAI/SkyReels-V1
 
 Improvements by pftq:
 - Fixed random number seed not changing.
-- Uses FFMPEG for video bitrate option (ie "--mbps 15")
+- Fixed videos only being 2mbps bitrate by using FFMPEG, which allows for video bitrate option (ie "--mbps 15")
 - embedding prompt details in the comment (similar to ComfyUI).
 - "--variety_batch" option for varying steps/cfg in the same batch.
 - "--color_match" for matching the color profile/grading of the reference image with mkl.
