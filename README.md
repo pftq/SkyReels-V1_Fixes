@@ -4,7 +4,7 @@ Improvements by pftq:
 - 192-frame-limit bug fixed via workaround using Riflex (credits Kijai and thu-ml for the approach in ComfyUI).
 - Fixed random number seed not changing.
 - Fixed videos only being 2mbps bitrate by using FFMPEG, which allows for video bitrate option (ie "--mbps 15")
-- embedding prompt details in the comment (similar to ComfyUI).
+- embedding prompt details in the mp4 comment metadata (similar to ComfyUI).
 - "--variety_batch" option for varying steps/cfg in the same batch.
 - "--color_match" for matching the color profile/grading of the reference image with mkl.
 - More useful video filename with datetime_width-frames_cfg_steps_seed
