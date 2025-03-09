@@ -111,7 +111,7 @@ class HunyuanVideoRotaryPosEmbedRifleX(HunyuanVideoRotaryPosEmbed):
             L_train = 25
             self.k = max(4, min(8, (num_frames + 3) // (4 * L_train)))
             self.L_test = num_latent_frames # latent frames
-        print ("DEBUG: num_frames="+str(num_frames)+" | k="+str(self.k)+" | L_test="+str(self.L_test))
+        #print ("DEBUG: num_frames="+str(num_frames)+" | k="+str(self.k)+" | L_test="+str(self.L_test))
         
         axes_grids = []
         for i in range(3):
