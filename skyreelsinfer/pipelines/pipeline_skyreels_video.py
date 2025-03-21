@@ -577,7 +577,7 @@ class SkyreelsVideoPipeline(HunyuanVideoPipeline):
             frames_to_check = video[0] if len(video) == 1 and isinstance(video[0], (list, tuple)) else video
             #logger.debug(f"Passing {len(frames_to_check)} frames to check_frame_transition (nested: {len(video) == 1 and isinstance(video[0], (list, tuple))})")
             max_frame_change, max_still_count = check_frame_transition(frames_to_check)
-            bad_render = max_frame_change >= 0.4 or max_still_count >= 24
+            bad_render = max_frame_change >= 0.19 or max_still_count >= 24
             logger.debug(f"Post-decoding bad render check: max_frame_change={max_frame_change:.4f}, max_still_count={max_still_count}, bad_render={bad_render}")
         # 20250319 pftq: bad render detection - End of post-decoding analysis
 
