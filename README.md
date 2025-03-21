@@ -20,6 +20,11 @@ Sample prompt, single GPU, variety batch of 10-sec videos with Riflex (automatic
 ```
 python video_generate.py \
 --gpu_num 1 \
+--quant \
+--offload \
+--high_cpu_memory \
+--parameters_level \
+--sequence_batch \
 --model_id "Skywork/SkyReels-V1-Hunyuan-I2V" \
 --task_type i2v \
 --guidance_scale 8 \
