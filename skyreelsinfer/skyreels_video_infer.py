@@ -109,7 +109,7 @@ class HunyuanVideoRotaryPosEmbedRifleX(HunyuanVideoRotaryPosEmbed):
         if num_frames > 192:
             self.k = 4
             L_train = 25
-            self.k = max(4, min(8, (num_frames + 3) // (4 * L_train)))
+            self.k = max(4, min(8, 2 + ((num_frames + 3) // (4 * L_train))))
             self.L_test = num_latent_frames # latent frames
         #print ("DEBUG: num_frames="+str(num_frames)+" | k="+str(self.k)+" | L_test="+str(self.L_test))
         
@@ -276,10 +276,27 @@ class SkyReelsVideoSingleGpuInfer:
                 del kwargs["seed"]
             start_time = time.time()
             assert (self.task_type == TaskType.I2V and "image" in kwargs) or self.task_type == TaskType.T2V
+            """
             out = self.pipe(**kwargs).frames[0]
             logger.info(f"rank:{dist.get_rank()} inference time: {time.time() - start_time}")
             if dist.get_rank() == 0:
                 response_queue.put(out)
+            """
+            # 20250319 pftq: Get full output object including frames, badRender, and maxFrameChange
+            output = self.pipe(**kwargs)
+            logger.info(f"rank:{dist.get_rank()} inference time: {time.time() - start_time}")
+            if dist.get_rank() == 0:
+                # Pass first frame, badRender, and maxFrameChange through the queue
+                response_queue.put({
+                    "frames": output.frames[0],  # Keep original behavior of sending first frame
+                    "badRender": output.badRender,
+                    "maxFrameChange": output.maxFrameChange,
+                    "maxStillCount": output.maxStillCount,
+                    "maxFrameChange_pre": output.maxFrameChange_pre,
+                    "maxStillCount_pre": output.maxStillCount_pre,
+                    "badRenderAtStep": output.badRenderAtStep,
+                    "initialMatch": output.initialMatch
+                })
 
 
 def single_gpu_run(
