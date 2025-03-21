@@ -1,13 +1,14 @@
 Original SkyReels repo: https://github.com/SkyworkAI/SkyReels-V1
 
 Improvements by pftq:
-- 192-frame-limit bug fixed via workaround using Riflex (credits Kijai for bringing it up in ComfyUI and thu-ml for the approach). The fix automatically kicks in at frame counts > 193
+- *Major*. 192-frame-limit bug fixed via workaround using Riflex (credits Kijai for bringing it up in ComfyUI and thu-ml for the approach). The fix automatically kicks in at frame counts > 193
+- *Major*. Added "--detect_bad_renders"to automatically abort and retry bad renders. Detects videos early likely to become a random still image or suddenly scene change.  Use "--bad_render_retries" to decide how many retries on the same video in a batch before moving on to settings (if in a variety batch with varying cfg/steps).  "--bad_render_threshold" default of 0.02 is conservative for detecting bad renders early, often 0.03 is also bad, but 0.04 and above usually is not a still image or scene change.
 - Fixed random number seed not changing.
 - Fixed videos only being 2mbps bitrate by using FFMPEG, which allows for video bitrate option (ie "--mbps 15")
 - embedding prompt details in the mp4 comment metadata (similar to ComfyUI).
 - "--variety_batch" option for varying steps/cfg in the same batch.
 - "--color_match" for matching the color profile/grading of the reference image with mkl.
-- More useful video filename with datetime_width-frames_cfg_steps_seed
+- More useful video filename with datetime, width, frames, cfg, steps, seed, and other details.
 
 Sample prompt, single GPU, variety batch of 10-sec videos with Riflex (automatic at frames>193)
 ```
@@ -27,6 +28,9 @@ python video_generate.py \
 --negative_prompt "chaotic, distortion, morphing, shaky camera, panning, zoom, glare, lens flare, camera movement, blur, out of focus, low quality, low resolution, static image, overexposed, deformation, bad hands, bad teeth, bad eyes, bad limbs" \
 --color_match \
 --variety_batch \
+--detect_bad_renders \
+--bad_render_retries 5 \
+--bad_render_threshold 0.02 \
 --mbps 15 \
 --video_num 10
 ```
@@ -48,6 +52,9 @@ python video_generate.py \
 --negative_prompt "chaotic, distortion, morphing, shaky camera, panning, zoom, camera movement, blur, out of focus, low quality, low resolution, static image, overexposed, deformation, bad hands, bad teeth, bad eyes, bad limbs" \
 --color_match \
 --variety_batch \
+--detect_bad_renders \
+--bad_render_retries 5 \
+--bad_render_threshold 0.02 \
 --mbps 15 \
 --video_num 10
 ```
