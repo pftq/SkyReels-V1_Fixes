@@ -2,13 +2,19 @@ Original SkyReels repo: https://github.com/SkyworkAI/SkyReels-V1
 
 Improvements by pftq:
 - **Major**. 192-frame-limit bug fixed via workaround using Riflex (credits Kijai for bringing it up in ComfyUI and thu-ml for the approach). The fix automatically kicks in at frame counts > 193
-- **Major**. Added "--detect_bad_renders"to automatically abort and retry bad renders. Detects videos both after post-decoding and early during sampling for videos likely to become a random still image or suddenly scene change.  Use "--bad_render_retries" to decide how many retries on the same video in a batch before moving on, this way to avoid coming back to no videos done if all got aborted; use in conjunction with "--variety_batch" to change up the CFG/steps settings if it moves on to the next video.  "--bad_render_threshold" default of 0.02 is conservative for detecting bad renders early, often 0.03 is also bad, but 0.04 and above usually is not a still image or scene change.  Add  "--save_bad_renders" line if you want to save potentially bad videos in case for manual review (but those aborted early pre-decoding phase will just be noise).  When detecting bad renders, the filename will also show threshold values for reference in case you need to refine them.
+- **Major**. Added "--detect_bad_renders" to automatically abort and retry bad renders (still image, random scene change, i2v becoming t2v). Details further below.
 - Fixed random number seed not changing.
 - Fixed videos only being 2mbps bitrate by using FFMPEG, which allows for video bitrate option (ie "--mbps 15")
 - embedding prompt details in the mp4 comment metadata (similar to ComfyUI).
 - "--variety_batch" option for varying steps/cfg in the same batch.
 - "--color_match" for matching the color profile/grading of the reference image with mkl.
 - More useful video filename with datetime, width, frames, cfg, steps, seed, and other details.
+
+**Details on "--detect_bad_renders" feature:**
+- "--detect_bad_renders" enables this functionality. It does a check during the sampling process and another after the video is fully decoded. The processing time is minimal, only scanning the first 2 seconds of the video once during sampling and once again after the video is done. It looks for major frame-to-frame changes, consecutive 24-frames of still image, and major deviation from the input image within the first 2 seconds as triggers for a "bad render." If it detects early and aborts, this saves you 75% of the render time on a video you won't want anyway.
+- "--bad_render_retries 5" will let it retry up to 5 times (or whatever number you pick) using the same settings but different seed. This lets you avoid requesting a batch of 3 videos and getting zero if all 3 are bad renders. Can be used in conjunction with "--variety_batch" to move onto the next video with differing CFG/steps.
+- "--bad_render_threshold 0.02" is the default threshold for checking a video early against the input image and is conservative. 0.03 often leads to bad renders as well, so increase it if you want. 0.04 and above generally do not become stills or scene changes.
+- "--save_bad_renders" can be added if you want to save the bad render in case for manual inspection. If the video is already in the decoding phase, it'll still be watchable, but it'll be mostly noise if the render was aborted early in sampling.
 
 Sample prompt, single GPU, variety batch of 10-sec videos with Riflex (automatic at frames>193)
 ```
