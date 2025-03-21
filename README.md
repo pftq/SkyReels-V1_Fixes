@@ -16,6 +16,8 @@ Improvements by pftq:
 - "--bad_render_threshold 0.02" is the default threshold for checking a video early against the input image and is conservative. 0.03 often leads to bad renders as well, so increase it if you want. 0.04 and above generally do not become stills or scene changes.
 - "--save_bad_renders" can be added if you want to save the bad render in case for manual inspection. If the video is already in the decoding phase, it'll still be watchable, but it'll be mostly noise if the render was aborted early in sampling.
 
+My guide to getting good results with SkyReels: https://github.com/SkyworkAI/SkyReels-V1/issues/96
+
 Sample prompt, single GPU, variety batch of 10-sec videos with Riflex (automatic at frames>193)
 ```
 python video_generate.py \
