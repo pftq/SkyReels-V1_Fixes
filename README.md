@@ -3,7 +3,7 @@ Original SkyReels repo: https://github.com/SkyworkAI/SkyReels-V1
 Improvements by pftq:
 - **Major**. 192-frame-limit bug fixed via workaround using Riflex (credits Kijai for bringing it up in ComfyUI and thu-ml for the approach). The fix automatically kicks in at frame counts > 193
 - **Major**. Added "--detect_bad_renders" to automatically abort and retry bad renders (still image, random scene change, i2v becoming t2v). Details further below.
-- Fixed random number seed not changing.
+- **Major**. Fixed random number seed not changing.
 - Fixed videos only being 2mbps bitrate by using FFMPEG, which allows for video bitrate option (ie "--mbps 15")
 - embedding prompt details in the mp4 comment metadata (similar to ComfyUI).
 - "--variety_batch" option for varying steps/cfg in the same batch.
